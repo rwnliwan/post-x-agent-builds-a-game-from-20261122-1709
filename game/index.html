@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ghost Catcher — a tiny game built from one prompt</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #191419; overflow: hidden; }
+  body { font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #wrap {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(1200px 700px at 50% 30%, #2b1230 0%, #191419 60%);
+  }
+  canvas {
+    display: block; width: min(100vw, calc(100vh * 16 / 9)); height: min(100vh, calc(100vw * 9 / 16));
+    cursor: crosshair; touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  #hint {
+    position: fixed; bottom: 10px; left: 0; right: 0; text-align: center;
+    color: #ffffff55; font-size: 12px; letter-spacing: .08em; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+<div id="hint">GHOST CATCHER &middot; BUILT FROM ONE PROMPT &middot; MAKE.FUN</div>
+<script>
+(function () {
+  "use strict";
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+
+  var MAGENTA = "#c41c83", INK = "#191419", WHITE = "#ffffff";
+  var GAME_LEN = 30; // seconds
+
+  var state = "menu"; // menu | playing | over
+  var score = 0, best = 0, timeLeft = GAME_LEN, lastTs = 0;
+  try { best = parseInt(localStorage.getItem("ghost-catcher-best") || "0", 10) || 0; } catch (e) { best = 0; }
+
+  // The ghost
+  var ghost = { x: W / 2, y: H / 2, r: 46, vx: 150, vy: 110, wobble: 0, dirTimer: 0, squash: 1 };
+  var particles = []; // {x,y,vx,vy,life,maxLife,size,color}
+  var floaters = [];  // {x,y,life,text}
+  var ripples = [];   // {x,y,life}
+  var stars = [];
+  var i, s;
+  for (i = 0; i < 70; i++) {
+    stars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.8 + 0.4, tw: Math.random() * Math.PI * 2 });
+  }
+
+  function randDir(speed) {
+    var a = Math.random() * Math.PI * 2;
+    return { vx: Math.cos(a) * speed, vy: Math.sin(a) * speed };
+  }
+  function speed() { return Math.min(150 * Math.pow(1.12, score), 720); }
+  function resetGhost() {
+    ghost.x = W * (0.25 + Math.random() * 0.5);
+    ghost.y = H * (0.3 + Math.random() * 0.4);
+    var d = randDir(speed());
+    ghost.vx = d.vx; ghost.vy = d.vy;
+    ghost.dirTimer = 0.8 + Math.random() * 0.8;
+    ghost.squash = 1;
+  }
+  function startGame() {
+    score = 0; timeLeft = GAME_LEN;
+    particles = []; floaters = []; ripples = [];
+    resetGhost();
+    state = "playing";
+    lastTs = performance.now();
+  }
+  function endGame() {
+    state = "over";
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem("ghost-catcher-best", String(best)); } catch (e) {}
+    }
+  }
+
+  function drawGhost(x, y, r, t) {
+    // soft magenta glow
+    var g = ctx.createRadialGradient(x, y, r * 0.2, x, y, r * 1.9);
+    g.addColorStop(0, "rgba(196,28,131,0.35)");
+    g.addColorStop(1, "rgba(196,28,131,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, r * 1.9, 0, Math.PI * 2); ctx.fill();
+
+    // body: dome + wavy skirt
+    var wob = Math.sin(t / 130) * 2;
+    ctx.save();
+    ctx.translate(x, y + wob);
+    ctx.fillStyle = WHITE;
+    ctx.beginPath();
+    ctx.moveTo(-r, r * 0.55);
+    ctx.lineTo(-r, -r * 0.1);
+    ctx.arc(0, -r * 0.1, r, Math.PI, 0);
+    ctx.lineTo(r, r * 0.55);
+    var waves = 4, step = (2 * r) / waves;
+    for (var k = 0; k < waves; k++) {
+      var x0 = r - k * step, x1 = r - (k + 1) * step;
+      var ym = r * 0.55 + (k % 2 === 0 ? r * 0.28 : -r * 0.05);
+      ctx.quadraticCurveTo((x0 + x1) / 2, ym, x1, r * 0.55);
+    }
+    ctx.closePath(); ctx.fill();
+    // eyes
+    ctx.fillStyle = INK;
+    ctx.beginPath(); ctx.ellipse(-r * 0.36, -r * 0.22, r * 0.13, r * 0.19, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(r * 0.36, -r * 0.22, r * 0.13, r * 0.19, 0, 0, Math.PI * 2); ctx.fill();
+    // smile
+    ctx.strokeStyle = INK; ctx.lineWidth = r * 0.06; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.arc(0, r * 0.12, r * 0.22, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+    // rosy cheeks
+    ctx.fillStyle = "rgba(196,28,131,0.35)";
+    ctx.beginPath(); ctx.arc(-r * 0.55, r * 0.08, r * 0.11, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(r * 0.55, r * 0.08, r * 0.11, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function burst(x, y) {
+    for (var k = 0; k < 16; k++) {
+      var a = Math.random() * Math.PI * 2, sp = 90 + Math.random() * 260;
+      particles.push({
+        x: x, y: y,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: 0.55 + Math.random() * 0.3, maxLife: 0.85,
+        size: 3 + Math.random() * 5,
+        color: Math.random() < 0.5 ? MAGENTA : WHITE
+      });
+    }
+  }
+
+  function update(dt, t) {
+    // ghost movement
+    ghost.dirTimer -= dt;
+    if (ghost.dirTimer <= 0) {
+      var d = randDir(speed());
+      ghost.vx = d.vx; ghost.vy = d.vy;
+      ghost.dirTimer = 0.8 + Math.random() * 0.9;
+    }
+    ghost.x += ghost.vx * dt;
+    ghost.y += ghost.vy * dt;
+    if (ghost.x < ghost.r) { ghost.x = ghost.r; ghost.vx = Math.abs(ghost.vx); }
+    if (ghost.x > W - ghost.r) { ghost.x = W - ghost.r; ghost.vx = -Math.abs(ghost.vx); }
+    if (ghost.y < ghost.r + 64) { ghost.y = ghost.r + 64; ghost.vy = Math.abs(ghost.vy); }
+    if (ghost.y > H - ghost.r - 16) { ghost.y = H - ghost.r - 16; ghost.vy = -Math.abs(ghost.vy); }
+    ghost.squash += (1 - ghost.squash) * Math.min(1, dt * 8);
+
+    for (var k = particles.length - 1; k >= 0; k--) {
+      var p = particles[k];
+      p.life -= dt;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 320 * dt;
+      if (p.life <= 0) particles.splice(k, 1);
+    }
+    for (var f = floaters.length - 1; f >= 0; f--) {
+      floaters[f].life -= dt; floaters[f].y -= 46 * dt;
+      if (floaters[f].life <= 0) floaters.splice(f, 1);
+    }
+    for (var rp = ripples.length - 1; rp >= 0; rp--) {
+      ripples[rp].life -= dt;
+      if (ripples[rp].life <= 0) ripples.splice(rp, 1);
+    }
+    if (state === "playing") {
+      timeLeft -= dt;
+      if (timeLeft <= 0) { timeLeft = 0; endGame(); }
+    }
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    // backdrop
+    ctx.fillStyle = "#191419";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffffff";
+    for (var k = 0; k < stars.length; k++) {
+      var st = stars[k];
+      ctx.globalAlpha = 0.25 + 0.55 * Math.abs(Math.sin(t / 700 + st.tw));
+      ctx.beginPath(); ctx.arc(st.x, st.y, st.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    if (state === "menu") {
+      drawGhost(W / 2, H / 2 - 30, 74, t);
+      ctx.textAlign = "center";
+      ctx.fillStyle = WHITE;
+      ctx.font = "800 64px Inter, system-ui, sans-serif";
+      ctx.fillText("GHOST CATCHER", W / 2, 116);
+      ctx.fillStyle = MAGENTA;
+      ctx.font = "700 22px Inter, system-ui, sans-serif";
+      ctx.fillText("A TINY GAME BUILT FROM ONE PROMPT", W / 2, 152);
+      ctx.fillStyle = "#ffffffcc";
+      ctx.font = "400 24px Inter, system-ui, sans-serif";
+      ctx.fillText("Click the ghost as many times as you can in 30 seconds.", W / 2, 396);
+      ctx.fillText("Every catch makes it faster.", W / 2, 428);
+      drawButton(W / 2 - 130, 452, 260, 56, "▶  START", t);
+      if (best > 0) {
+        ctx.fillStyle = "#ffffff88";
+        ctx.font = "600 18px Inter, system-ui, sans-serif";
+        ctx.fillText("BEST: " + best, W / 2, 500);
+      }
+      return;
+    }
+
+    if (state === "over") {
+      drawGhost(W / 2, H / 2 - 60, 60, t);
+      ctx.textAlign = "center";
+      ctx.fillStyle = WHITE;
+      ctx.font = "800 56px Inter, system-ui, sans-serif";
+      ctx.fillText("TIME'S UP!", W / 2, 108);
+      ctx.fillStyle = MAGENTA;
+      ctx.font = "800 84px Inter, system-ui, sans-serif";
+      ctx.fillText(score + " GHOST" + (score === 1 ? "" : "S"), W / 2, 210);
+      ctx.fillStyle = "#ffffffcc";
+      ctx.font = "400 24px Inter, system-ui, sans-serif";
+      ctx.fillText(score >= best && score > 0 ? "New best! Nice catching." : "Best: " + best + " — can you beat it?", W / 2, 258);
+      drawButton(W / 2 - 130, 300, 260, 56, "↻  PLAY AGAIN", t);
+      return;
+    }
+
+    // playing: HUD — bar at the very top edge, score centred, timer right,
+    // all clear of the make.fun brand badge box (top-left of the frame).
+    ctx.textAlign = "center";
+    ctx.fillStyle = WHITE;
+    ctx.font = "800 44px Inter, system-ui, sans-serif";
+    ctx.fillText("SCORE  " + score, W / 2, 58);
+    ctx.textAlign = "right";
+    ctx.fillStyle = timeLeft <= 10 ? MAGENTA : WHITE;
+    ctx.font = "800 44px Inter, system-ui, sans-serif";
+    ctx.fillText(timeLeft.toFixed(1) + "s", W - 28, 58);
+    // progress bar
+    ctx.fillStyle = "#ffffff22";
+    ctx.fillRect(0, 8, W, 6);
+    ctx.fillStyle = MAGENTA;
+    ctx.fillRect(0, 8, W * (timeLeft / GAME_LEN), 6);
+
+    drawGhost(ghost.x, ghost.y, ghost.r * ghost.squash, t);
+
+    for (var p = 0; p < particles.length; p++) {
+      var pt = particles[p];
+      ctx.globalAlpha = Math.max(0, pt.life / pt.maxLife);
+      ctx.fillStyle = pt.color;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    for (var rp2 = 0; rp2 < ripples.length; rp2++) {
+      var rp3 = ripples[rp2];
+      ctx.globalAlpha = Math.max(0, rp3.life / 0.4);
+      ctx.strokeStyle = "#ffffff88"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(rp3.x, rp3.y, (0.4 - rp3.life) * 160 + 8, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "center";
+    for (var f = 0; f < floaters.length; f++) {
+      var fl = floaters[f];
+      ctx.globalAlpha = Math.max(0, fl.life / 0.7);
+      ctx.fillStyle = "#ffd7ef";
+      ctx.font = "800 30px Inter, system-ui, sans-serif";
+      ctx.fillText(fl.text, fl.x, fl.y);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawButton(x, y, w, h, label, t) {
+    var pulse = 1 + Math.sin(t / 260) * 0.02;
+    ctx.save();
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = MAGENTA;
+    ctx.beginPath();
+    var r = 14;
+    ctx.moveTo(-w / 2 + r, -h / 2);
+    ctx.lineTo(w / 2 - r, -h / 2); ctx.arcTo(w / 2, -h / 2, w / 2, -h / 2 + r, r);
+    ctx.lineTo(w / 2, h / 2 - r); ctx.arcTo(w / 2, h / 2, w / 2 - r, h / 2, r);
+    ctx.lineTo(-w / 2 + r, h / 2); ctx.arcTo(-w / 2, h / 2, -w / 2, h / 2 - r, r);
+    ctx.lineTo(-w / 2, -h / 2 + r); ctx.arcTo(-w / 2, -h / 2, -w / 2 + r, -h / 2, r);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = WHITE;
+    ctx.font = "800 24px Inter, system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(label, 0, 1);
+    ctx.restore();
+    ctx.textBaseline = "alphabetic";
+  }
+
+  function frame(ts) {
+    var dt = Math.min(0.05, (ts - lastTs) / 1000 || 0.016);
+    lastTs = ts;
+    if (state === "playing") update(dt, ts);
+    else update(dt, ts); // keep the ghost bobbing + particles alive on menu/over too
+    draw(ts);
+    requestAnimationFrame(frame);
+  }
+
+  function canvasPos(ev) {
+    var rect = canvas.getBoundingClientRect();
+    return {
+      x: (ev.clientX - rect.left) * (W / rect.width),
+      y: (ev.clientY - rect.top) * (H / rect.height)
+    };
+  }
+
+  canvas.addEventListener("pointerdown", function (ev) {
+    ev.preventDefault();
+    var p = canvasPos(ev);
+    if (state === "menu") {
+      if (p.x > W / 2 - 130 && p.x < W / 2 + 130 && p.y > 452 && p.y < 508) startGame();
+      return;
+    }
+    if (state === "over") {
+      if (p.x > W / 2 - 130 && p.x < W / 2 + 130 && p.y > 300 && p.y < 356) startGame();
+      return;
+    }
+    var dx = p.x - ghost.x, dy = p.y - ghost.y;
+    if (Math.sqrt(dx * dx + dy * dy) <= ghost.r + 8) {
+      score++;
+      burst(ghost.x, ghost.y);
+      floaters.push({ x: ghost.x, y: ghost.y - ghost.r - 8, life: 0.7, text: "+1" });
+      ghost.squash = 0.7;
+      resetGhost();
+    } else {
+      ripples.push({ x: p.x, y: p.y, life: 0.4 });
+    }
+  });
+
+  // expose a tiny hook for automated testing
+  window.__ghostCatcher = {
+    state: function () { return state; },
+    score: function () { return score; },
+    ghost: function () { return { x: ghost.x, y: ghost.y, r: ghost.r, vx: ghost.vx, vy: ghost.vy }; },
+    start: startGame
+  };
+
+  lastTs = performance.now();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
